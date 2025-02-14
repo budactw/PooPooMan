@@ -16,7 +16,7 @@ enum PoopCommand: string
     {
         return implode("\n", collect(self::cases())->map(function (PoopCommand $command) {
             return $command->value . ' - ' . $command->desc();
-        })->toArray()) . "\n 請輸入指令，例如紀錄便便，請輸入「💩」符號，或是輸入「/排行」查看排行榜";
+        })->toArray()) . "\n\n 請輸入指令，例如紀錄便便，請輸入「💩」符號，或是輸入「/排行」查看排行榜";
     }
 
     public function desc()

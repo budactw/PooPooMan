@@ -19,6 +19,7 @@ use LINE\Constants\HTTPHeader;
 use LINE\Parser\EventRequestParser;
 use LINE\Parser\Exception\InvalidEventRequestException;
 use LINE\Parser\Exception\InvalidSignatureException;
+use LINE\Webhook\Model\JoinedMembers;
 use LINE\Webhook\Model\MessageEvent;
 use LINE\Webhook\Model\TextMessageContent;
 
@@ -332,8 +333,8 @@ class PoopService
             foreach ($weeklyRank as $index => $record) {
                 $rank = $index + 1;
                 $message .= "{$rank}. {$record['name']} {$record['totalCount']} 次 ";
-                $message .= "(" . PoopType::GoodPoop->toString() . ": {$record['typeCounts'][PoopType::GoodPoop->toString()]}、 ";
-                $message .= PoopType::StuckPoop->toString() . ": {$record['typeCounts'][PoopType::StuckPoop->toString()]}、 ";
+                $message .= "(" . PoopType::GoodPoop->toString() . ": {$record['typeCounts'][PoopType::GoodPoop->toString()]}, ";
+                $message .= PoopType::StuckPoop->toString() . ": {$record['typeCounts'][PoopType::StuckPoop->toString()]}, ";
                 $message .= PoopType::BadPoop->toString() . ": {$record['typeCounts'][PoopType::BadPoop->toString()]})\n";
             }
         } else {
