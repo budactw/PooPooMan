@@ -90,7 +90,6 @@ class PoopService
         $command = PoopCommand::tryFrom($message->getText());
 
         if (!$command) {
-            $this->replyMessageWithText($event, '找不到指令，請輸入 /指令 查看可用指令');
 
             return;
         }
@@ -282,7 +281,7 @@ class PoopService
 
         // 設定快取
         $cacheKey = $this->getCacheKey($profile->getUserId(), $poopRecord->group_id);
-        Cache::put($cacheKey, Carbon::now()->addHours(self::POOP_RECORD_TTL));
+        Cache::put($cacheKey, true, Carbon::now()->addHours(self::POOP_RECORD_TTL));
 
         // 計算今日次數
         $todayCount = PoopRecord::where('group_id', $poopRecord->group_id)
