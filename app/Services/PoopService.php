@@ -128,6 +128,134 @@ class PoopService
         }
     }
 
+
+    /**
+     * 取得便便紀錄查詢
+     */
+    private function getPoopQuery(?string $groupId, ?string $userId = null)
+    {
+        $query = PoopRecord::query();
+
+        if ($groupId) {
+            $query->where('group_id', $groupId);
+        }
+
+        if ($userId) {
+            $query->where('user_id', $userId);
+        }
+
+        return $query;
+    }
+
+    /**
+     * 計算便便次數
+     */
+    private function calculateCounts($query, ?string $dateRange = null): array
+    {
+        if ($dateRange === 'today') {
+            $query->whereDate('record_date', Carbon::today());
+        } elseif ($dateRange === 'week') {
+            $query->whereBetween('record_date', [
+                Carbon::now()->startOfWeek(),
+                Carbon::now()->endOfWeek(),
+            ]);
+        } elseif ($dateRange === 'month') {
+            $query->whereMonth('record_date', Carbon::now()->month);
+        }
+
+        $totalCount = $query->count();
+
+        $typeCounts = $query->get()->groupBy('poop_type')->map->count();
+
+        return [
+            'total'      => $totalCount,
+            'typeCounts' => [
+                PoopType::GoodPoop->toString()  => $typeCounts[PoopType::GoodPoop->value] ?? 0,
+                PoopType::StuckPoop->toString() => $typeCounts[PoopType::StuckPoop->value] ?? 0,
+                PoopType::BadPoop->toString()   => $typeCounts[PoopType::BadPoop->value] ?? 0,
+            ],
+        ];
+    }
+
+    /**
+     * 格式化便便統計訊息
+     */
+    private function formatStatisticsMessage(string $title, array $counts): string
+    {
+        return "{$title}\n" .
+            "總次數: {$counts['total']} 次\n" .
+            PoopType::GoodPoop->toString() . ": {$counts['typeCounts'][PoopType::GoodPoop->toString()]} 次\n" .
+            PoopType::StuckPoop->toString() . ": {$counts['typeCounts'][PoopType::StuckPoop->toString()]} 次\n" .
+            PoopType::BadPoop->toString() . ": {$counts['typeCounts'][PoopType::BadPoop->toString()]} 次\n";
+    }
+
+    /**
+     * @throws ApiException
+     */
+    private function getSummarize(MessageEvent $event): void
+    {
+        try {
+            $userId = $event->getSource()->getUserId();
+            $profile = $this->getProfile($event);
+            $groupId = $this->getGroupId($event);
+
+            $query = $this->getPoopQuery($groupId, $userId);
+
+            // 計算各種統計數據
+            $todayCounts = $this->calculateCounts(clone $query, 'today');
+            $weekCounts = $this->calculateCounts(clone $query, 'week');
+            $monthCounts = $this->calculateCounts(clone $query, 'month');
+            $totalCounts = $this->calculateCounts(clone $query);
+
+            // 計算平均值
+            $firstRecord = $query->oldest()->first();
+            if ($firstRecord) {
+                $daysFromFirst = Carbon::parse($firstRecord->record_date)
+                        ->diffInDays(Carbon::now()) + 1;
+                $average = round($totalCounts['total'] / $daysFromFirst);
+            } else {
+                $average = 0;
+            }
+
+            // 組裝訊息
+            $message = "💩 {$profile->getDisplayName()} 的便便統計 💩\n" .
+                $this->formatStatisticsMessage("\n📆今日統計📆\n", $todayCounts) .
+                $this->formatStatisticsMessage("\n📆本週統計📆\n", $weekCounts) .
+                $this->formatStatisticsMessage("\n📆本月統計📆\n", $monthCounts) .
+                "\n總計次數: {$totalCounts['total']} 次\n" .
+                "平均每日: {$average} 次";
+
+            $this->replyMessageWithText($event, $message);
+
+        } catch (ApiException $e) {
+            Log::error('便便統計失敗: ' . $e->getMessage());
+            $this->replyMessageWithText($event, '統計資料取得失敗，請稍後再試');
+        }
+    }
+
+    /**
+     * @throws ApiException
+     */
+    private function getGroupStatistics(MessageEvent $event): void
+    {
+        $groupId = $this->getGroupId($event);
+
+        $query = $this->getPoopQuery($groupId);
+
+        // 計算各種統計數據
+        $weeklyCounts = $this->calculateCounts(clone $query, 'week');
+        $monthlyCounts = $this->calculateCounts(clone $query, 'month');
+        $totalCounts = $this->calculateCounts(clone $query);
+
+        // 組裝訊息
+        $message = "💩 群組便便統計 💩\n" .
+            $this->formatStatisticsMessage("\n📆本週統計📆\n", $weeklyCounts) .
+            $this->formatStatisticsMessage("\n📆本月統計📆\n", $monthlyCounts) .
+            "\n總計次數: {$totalCounts['total']} 次";
+
+        $this->replyMessageWithText($event, $message);
+    }
+
     /**
      * @throws ApiException
      */
@@ -183,30 +311,6 @@ class PoopService
     }
 
     /**
-     * @throws ApiException
-     */
-    private function getGroupStatistics(MessageEvent $event): void
-    {
-        $groupId = $this->getGroupId($event);
-
-        // 取得統計資料
-        $statistics = $this->getStatistics($groupId);
-
-        // 計算次數
-        $weeklyCount = $statistics['weekly']->count();
-        $monthlyCount = $statistics['monthly']->count();
-        $totalCount = $statistics['total'];
-
-        // 組裝訊息
-        $message = "💩 群組便便統計 💩\n";
-        $message .= "\n📅 本週次數: {$weeklyCount} 次";
-        $message .= "\n📆 本月次數: {$monthlyCount} 次";
-        $message .= "\n📈 總次數: {$totalCount} 次";
-
-        $this->replyMessageWithText($event, $message);
-    }
-
-    /**
      * 取得排行榜
      *
      * @throws ApiException
@@ -218,96 +322,40 @@ class PoopService
         // 取得統計資料
         $statistics = $this->getStatistics($groupId);
 
-        // 生成排行榜
-        $weeklyRank = $this->generateRank($statistics['weekly']);
-        $monthlyRank = $this->generateRank($statistics['monthly']);
-
         // 組裝訊息
         $message = "💩 群組排行榜 💩\n";
 
-        // 本週排行榜
+        // 本週總排行榜
+        $message .= "\n📅 本週排行榜 📅\n";
+        $weeklyRank = $this->generateRankWithType($statistics['weekly']);
         if ($weeklyRank->isNotEmpty()) {
-            $message .= "\n📅 本週排行榜 📅\n";
             foreach ($weeklyRank as $index => $record) {
                 $rank = $index + 1;
-                $message .= "{$rank}. {$record['name']}: {$record['count']} 次\n";
+                $message .= "{$rank}. {$record['name']} {$record['totalCount']} 次 ";
+                $message .= "(" . PoopType::GoodPoop->toString() . ": {$record['typeCounts'][PoopType::GoodPoop->toString()]}、 ";
+                $message .= PoopType::StuckPoop->toString() . ": {$record['typeCounts'][PoopType::StuckPoop->toString()]}、 ";
+                $message .= PoopType::BadPoop->toString() . ": {$record['typeCounts'][PoopType::BadPoop->toString()]})\n";
             }
         } else {
-            $message .= "\n📅 本週還沒有人便便喔，請努力！！\n";
+            $message .= "暫無紀錄\n";
         }
 
-        // 本月排行榜
+        // 本月總排行榜
+        $message .= "\n📆 本月排行榜 📆\n";
+        $monthlyRank = $this->generateRankWithType($statistics['monthly']);
         if ($monthlyRank->isNotEmpty()) {
-            $message .= "\n📆 本月排行榜 📆\n";
             foreach ($monthlyRank as $index => $record) {
                 $rank = $index + 1;
-                $message .= "{$rank}. {$record['name']}: {$record['count']} 次\n";
+                $message .= "{$rank}. {$record['name']} {$record['totalCount']} 次 ";
+                $message .= "(" . PoopType::GoodPoop->toString() . ": {$record['typeCounts'][PoopType::GoodPoop->toString()]}, ";
+                $message .= PoopType::StuckPoop->toString() . ": {$record['typeCounts'][PoopType::StuckPoop->toString()]}, ";
+                $message .= PoopType::BadPoop->toString() . ": {$record['typeCounts'][PoopType::BadPoop->toString()]})\n";
             }
         } else {
-            $message .= "\n📆 本月還沒有人便便喔，請努力！！\n";
+            $message .= "暫無紀錄\n";
         }
 
         $this->replyMessageWithText($event, $message);
-    }
-
-
-    /**
-     * @throws ApiException
-     */
-    private function getSummarize(MessageEvent $event): void
-    {
-        try {
-            $userId = $event->getSource()->getUserId();
-            $profile = $this->getProfile($event);
-            $groupId = $this->getGroupId($event);
-
-            $query = PoopRecord::query()
-                ->where('user_id', $userId);
-
-            if ($this->isGroupSource($event)) {
-                $query->where('group_id', $groupId);
-            }
-
-            // 計算各種統計數據
-            $todayCount = (clone $query)
-                ->whereDate('record_date', Carbon::today())
-                ->count();
-
-            $weekCount = (clone $query)
-                ->whereBetween('record_date', [
-                    Carbon::now()->startOfWeek(),
-                    Carbon::now()->endOfWeek(),
-                ])->count();
-
-            $monthCount = (clone $query)
-                ->whereMonth('record_date', Carbon::now()->month)
-                ->count();
-
-            $totalCount = $query->count();
-
-            // 計算平均值
-            $firstRecord = $query->oldest()->first();
-            if ($firstRecord) {
-                $daysFromFirst = Carbon::parse($firstRecord->record_date)
-                        ->diffInDays(Carbon::now()) + 1;
-                $average = round($totalCount / $daysFromFirst);
-            } else {
-                $average = 0;
-            }
-
-            $message = "💩 {$profile->getDisplayName()} 的便便統計 💩\n" .
-                "今日次數: {$todayCount} 次\n" .
-                "本週次數: {$weekCount} 次\n" .
-                "本月次數: {$monthCount} 次\n" .
-                "總計次數: {$totalCount} 次\n" .
-                "平均每日: {$average} 次";
-
-            $this->replyMessageWithText($event, $message);
-
-        } catch (ApiException $e) {
-            Log::error('便便統計失敗: ' . $e->getMessage());
-            $this->replyMessageWithText($event, '統計資料取得失敗，請稍後再試');
-        }
     }
 
     private function availableToRecordPoop(MessageEvent $event): bool
@@ -383,10 +431,33 @@ class PoopService
         // 總次數
         $totalCount = $records->count();
 
+        // 根據 PoopType 分類
+        $weeklyByType = $this->groupByPoopType($weeklyRecords);
+        $monthlyByType = $this->groupByPoopType($monthlyRecords);
+
         return [
-            'weekly'  => $weeklyRecords,
-            'monthly' => $monthlyRecords,
-            'total'   => $totalCount,
+            'weekly'        => $weeklyRecords,
+            'monthly'       => $monthlyRecords,
+            'total'         => $totalCount,
+            'weeklyByType'  => $weeklyByType,
+            'monthlyByType' => $monthlyByType,
+        ];
+    }
+
+    /**
+     * 根據 PoopType 分類統計
+     *
+     * @param \Illuminate\Support\Collection $records
+     * @return array
+     */
+    private function groupByPoopType($records): array
+    {
+        $grouped = $records->groupBy('poop_type');
+
+        return [
+            PoopType::GoodPoop->toString()  => $grouped[PoopType::GoodPoop->value] ?? collect(),
+            PoopType::StuckPoop->toString() => $grouped[PoopType::StuckPoop->value] ?? collect(),
+            PoopType::BadPoop->toString()   => $grouped[PoopType::BadPoop->value] ?? collect(),
         ];
     }
 
@@ -396,16 +467,23 @@ class PoopService
      * @param \Illuminate\Support\Collection $records 篩選後的紀錄
      * @return \Illuminate\Support\Collection 排行榜資料
      */
-    private function generateRank($records): \Illuminate\Support\Collection
+    private function generateRankWithType($records): \Illuminate\Support\Collection
     {
         return $records->groupBy('user_id')
             ->map(function ($userRecords) {
+                $typeCounts = $userRecords->groupBy('poop_type')->map->count();
+
                 return [
-                    'name'  => $userRecords->first()->user_name,
-                    'count' => $userRecords->count(),
+                    'name'       => $userRecords->first()->user_name,
+                    'totalCount' => $userRecords->count(),
+                    'typeCounts' => [
+                        PoopType::GoodPoop->toString()  => $typeCounts[PoopType::GoodPoop->value] ?? 0,
+                        PoopType::StuckPoop->toString() => $typeCounts[PoopType::StuckPoop->value] ?? 0,
+                        PoopType::BadPoop->toString()   => $typeCounts[PoopType::BadPoop->value] ?? 0,
+                    ],
                 ];
             })
-            ->sortByDesc('count')
+            ->sortByDesc('totalCount')
             ->values();
     }
 }

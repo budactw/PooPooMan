@@ -11,7 +11,7 @@ enum PoopType: int
     public function toString(): string
     {
         return match ($this) {
-            PoopType::GoodPoop => '順暢',
+            PoopType::GoodPoop => '順拉',
             PoopType::StuckPoop => '便秘',
             PoopType::BadPoop => '烙賽',
         };
