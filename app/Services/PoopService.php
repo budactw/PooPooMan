@@ -277,6 +277,7 @@ class PoopService
             'user_id'     => $profile->getUserId(),
             'user_name'   => $profile->getDisplayName(),
             'record_date' => Carbon::now(),
+            'poop_type'   => $poopType,
         ]);
 
         // 設定快取
