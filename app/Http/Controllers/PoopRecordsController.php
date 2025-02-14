@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\LineBotService;
+use App\Services\PoopService;
 use Illuminate\Http\Request;
 use LINE\Constants\HTTPHeader;
 class PoopRecordsController extends Controller
@@ -15,10 +15,9 @@ class PoopRecordsController extends Controller
             abort(400, 'Signature not found');
         }
 
-        $lbs = new LineBotService();
+        $lbs = new PoopService();
 
         $lbs->handleMessage($request);
-
 
         return response()->noContent(200);
     }

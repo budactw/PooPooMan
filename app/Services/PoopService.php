@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Enum\PoopCommand;
+use App\Enum\PoopType;
 use GuzzleHttp\Client;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -20,33 +22,12 @@ use LINE\Parser\Exception\InvalidSignatureException;
 use LINE\Webhook\Model\MessageEvent;
 use LINE\Webhook\Model\TextMessageContent;
 
-class LineBotService
+class PoopService
 {
     /**
      * 便便紀錄快取時間(小時)
      */
     const POOP_RECORD_TTL = 1;
-
-    /**
-     * 指令對應表
-     */
-    private const COMMANDS = [
-        '本日排行' => 'getDailyRanking',
-        '本月排行' => 'getMonthlyRanking',
-        '本週排行' => 'getWeeklyRanking',
-        '便便統計' => 'getSummarize',
-        '屎王是誰'     => 'getPoopKing',
-        '💩'        => 'recordPoop',
-        '💩 '       => 'recordPoop',
-        '💩💩'       => 'recordPoop',
-        '💩💩💩'      => 'recordPoop',
-        'poop'     => 'recordPoop',
-        '便便'     => 'recordPoop',
-    ];
-
-    private const DEFAULT_MESSAGE = '請輸入 💩 來記錄便便';
-
-    private const GROUP_ONLY_MESSAGE = '請在群組中使用此功能';
 
     private MessagingApiApi $bot;
 
@@ -106,28 +87,51 @@ class LineBotService
             return;
         }
 
-        $command = $message->getText();
-        $method = self::COMMANDS[$command] ?? null;
+        $command = PoopCommand::tryFrom($message->getText());
 
-        if (!$method) {
-            return;
-        }
-
-        // 檢查群組限定指令
-        $groupOnlyCommands = ['本日排行', '本月排行', '本週排行', '屎王'];
-        if (in_array($command, $groupOnlyCommands) && !$this->isGroupSource($event)) {
-            $this->replyMessageWithText($event, self::GROUP_ONLY_MESSAGE);
+        if (!$command) {
+            $this->replyMessageWithText($event, '找不到指令，請輸入 /指令 查看可用指令');
 
             return;
         }
 
-        $this->$method($event);
+        if (!$command->allowOneToOne() && !$this->isGroupSource($event)) {
+            $this->replyMessageWithText($event, '請在群組中使用此功能');
+
+            return;
+        }
+
+        switch ($command) {
+            case PoopCommand::Help:
+                $this->replyMessageWithText($event, PoopCommand::showHelp());
+                break;
+            case PoopCommand::Rank:
+                $this->getRank($event);
+                break;
+            case PoopCommand::Summarize:
+                $this->getSummarize($event);
+                break;
+            case PoopCommand::GoodPoop:
+                $this->recordPoop($event, PoopType::GoodPoop);
+                break;
+            case PoopCommand::StuckPoop:
+                $this->recordPoop($event, PoopType::StuckPoop);
+                break;
+            case PoopCommand::BadPoop:
+                $this->recordPoop($event, PoopType::BadPoop);
+                break;
+            case PoopCommand::GroupSummarize:
+                $this->getGroupStatistics($event);
+                break;
+            default:
+                $this->replyMessageWithText($event, '找不到指令，請輸入 /指令 查看可用指令');
+        }
     }
 
     /**
      * @throws ApiException
      */
-    private function recordPoop(MessageEvent $event): void
+    private function recordPoop(MessageEvent $event, PoopType $poopType): void
     {
         $profile = $this->getProfile($event);
 
@@ -139,7 +143,6 @@ class LineBotService
 
             return;
         }
-
 
         // 記錄大便
         $poopRecord = PoopRecord::create([
@@ -159,14 +162,9 @@ class LineBotService
             ->whereDate('record_date', Carbon::today())
             ->count();
 
-        // 計算總次數
-        $totalCount = PoopRecord::where('group_id', $poopRecord->group_id)
-            ->where('user_id', $poopRecord->user_id)
-            ->count();
-
         $this->replyMessageWithText(
             $event,
-            "💩 {$poopRecord->user_name} 今日第 {$todayCount} 次便便\n累計: {$totalCount} 次"
+            "💩 {$poopRecord->user_name} 今日第 {$todayCount} 次便便\n"
         );
     }
 
@@ -187,115 +185,71 @@ class LineBotService
     /**
      * @throws ApiException
      */
-    private function getDailyRanking(MessageEvent $event): void
+    private function getGroupStatistics(MessageEvent $event): void
     {
         $groupId = $this->getGroupId($event);
-        $records = PoopRecord::query()
-            ->where('group_id', $groupId)
-            ->whereDate('record_date', Carbon::today())
-            ->get()
-            ->groupBy('user_id')
-            ->map(function ($userRecords) {
-                return [
-                    'name'  => $userRecords->first()->user_name,
-                    'count' => $userRecords->count(),
-                ];
-            })
-            ->sortByDesc('count')
-            ->values();
 
-        if ($records->isEmpty()) {
-            $this->replyMessageWithText($event, '今日還沒有人便便喔，請努力！！');
+        // 取得統計資料
+        $statistics = $this->getStatistics($groupId);
 
-            return;
-        }
+        // 計算次數
+        $weeklyCount = $statistics['weekly']->count();
+        $monthlyCount = $statistics['monthly']->count();
+        $totalCount = $statistics['total'];
 
-        $message = "💩 今日便便排行榜 💩\n";
-        foreach ($records as $index => $record) {
-            $rank = $index + 1;
-            $message .= "{$rank}. {$record['name']}: {$record['count']} 次\n";
-        }
+        // 組裝訊息
+        $message = "💩 群組便便統計 💩\n";
+        $message .= "\n📅 本週次數: {$weeklyCount} 次";
+        $message .= "\n📆 本月次數: {$monthlyCount} 次";
+        $message .= "\n📈 總次數: {$totalCount} 次";
 
         $this->replyMessageWithText($event, $message);
     }
 
     /**
+     * 取得排行榜
+     *
      * @throws ApiException
      */
-    private function getMonthlyRanking(MessageEvent $event): void
+    private function getRank(MessageEvent $event): void
     {
         $groupId = $this->getGroupId($event);
-        $records = PoopRecord::query()
-            ->where('group_id', $groupId)
-            ->whereMonth('record_date', Carbon::now()->month)
-            ->get()
-            ->groupBy('user_id')
-            ->map(function ($userRecords) {
-                return [
-                    'name'  => $userRecords->first()->user_name,
-                    'count' => $userRecords->count(),
-                ];
-            })
-            ->sortByDesc('count')
-            ->values();
 
-        if ($records->isEmpty()) {
-            $this->replyMessageWithText($event, '本月還沒有人便便喔，請努力！！');
+        // 取得統計資料
+        $statistics = $this->getStatistics($groupId);
 
-            return;
+        // 生成排行榜
+        $weeklyRank = $this->generateRank($statistics['weekly']);
+        $monthlyRank = $this->generateRank($statistics['monthly']);
+
+        // 組裝訊息
+        $message = "💩 群組排行榜 💩\n";
+
+        // 本週排行榜
+        if ($weeklyRank->isNotEmpty()) {
+            $message .= "\n📅 本週排行榜 📅\n";
+            foreach ($weeklyRank as $index => $record) {
+                $rank = $index + 1;
+                $message .= "{$rank}. {$record['name']}: {$record['count']} 次\n";
+            }
+        } else {
+            $message .= "\n📅 本週還沒有人便便喔，請努力！！\n";
         }
 
-        $message = "💩 本月便便排行榜 💩\n";
-        foreach ($records as $index => $record) {
-            $rank = $index + 1;
-            $message .= "{$rank}. {$record['name']}: {$record['count']} 次\n";
+        // 本月排行榜
+        if ($monthlyRank->isNotEmpty()) {
+            $message .= "\n📆 本月排行榜 📆\n";
+            foreach ($monthlyRank as $index => $record) {
+                $rank = $index + 1;
+                $message .= "{$rank}. {$record['name']}: {$record['count']} 次\n";
+            }
+        } else {
+            $message .= "\n📆 本月還沒有人便便喔，請努力！！\n";
         }
 
         $this->replyMessageWithText($event, $message);
     }
 
-    /**
-     * @throws ApiException
-     */
-    private function getWeeklyRanking(MessageEvent $event): void
-    {
-        $groupId = $this->getGroupId($event);
-        $records = PoopRecord::query()
-            ->where('group_id', $groupId)
-            ->whereBetween('record_date', [
-                Carbon::now()->startOfWeek(),
-                Carbon::now()->endOfWeek(),
-            ])
-            ->get()
-            ->groupBy('user_id')
-            ->map(function ($userRecords) {
-                return [
-                    'group_id' => $userRecords->first()->group_id,
-                    'user_id' => $userRecords->first()->user_id,
-                    'name'    => $userRecords->first()->user_name,
-                    'count'   => $userRecords->count(),
-                ];
-            })
-            ->sortByDesc('count')
-            ->values();
-
-        if ($records->isEmpty()) {
-            $this->replyMessageWithText($event, '本週還沒有人便便喔，請努力！！');
-
-            return;
-        }
-
-        $message = "💩 本週便便排行榜 💩\n";
-        foreach ($records as $index => $record) {
-            $rank = $index + 1;
-            $message .= "{$rank}. {$record['name']}: {$record['count']} 次\n";
-        }
-
-
-        $this->replyMessageWithText($event, $message);
-
-        $king = $records->sortByDesc('count')->first();
-    }
 
     /**
      * @throws ApiException
@@ -401,54 +355,57 @@ class LineBotService
     }
 
     /**
-     * @throws ApiException
+     * 取得群組便便統計資料
+     *
+     * @param mixed $groupId 群組 ID
+     * @return array 統計結果
      */
-    private function getPoopKing(MessageEvent $event): void
+    private function getStatistics($groupId): array
     {
-        $king = PoopRecord::query()
-            ->where('group_id', $this->getGroupId($event))
-            ->whereBetween('record_date', [
+        // 查詢所有便便紀錄
+        $records = PoopRecord::query()
+            ->where('group_id', $groupId)
+            ->get();
+
+        // 本週次數
+        $weeklyRecords = $records->filter(function ($record) {
+            return Carbon::parse($record->record_date)->between(
                 Carbon::now()->startOfWeek(),
-                Carbon::now()->endOfWeek(),
-            ])
-            ->get()
-            ->groupBy('user_id')
-            ->map(function ($userRecords) {
-                return [
-                    'group_id' => $userRecords->first()->group_id,
-                    'user_id' => $userRecords->first()->user_id,
-                    'name'    => $userRecords->first()->user_name,
-                    'count'   => $userRecords->count(),
-                ];
-            })
-            ->sortByDesc('count')
-            ->first();
+                Carbon::now()->endOfWeek()
+            );
+        });
 
-        $profile = $this->bot->getGroupMemberProfile($king['group_id'], $king['user_id']);
+        // 本月次數
+        $monthlyRecords = $records->filter(function ($record) {
+            return Carbon::parse($record->record_date)->month === Carbon::now()->month;
+        });
 
-        $this->replyMessageWithImage($event, $profile->getPictureUrl());
+        // 總次數
+        $totalCount = $records->count();
+
+        return [
+            'weekly'  => $weeklyRecords,
+            'monthly' => $monthlyRecords,
+            'total'   => $totalCount,
+        ];
     }
 
     /**
-     * @throws ApiException
+     * 生成排行榜
+     *
+     * @param \Illuminate\Support\Collection $records 篩選後的紀錄
+     * @return \Illuminate\Support\Collection 排行榜資料
      */
-    private function replyMessageWithImage(MessageEvent $event, ?string $imageUrl): void
+    private function generateRank($records): \Illuminate\Support\Collection
     {
-        if (!$imageUrl) {
-            $this->replyMessageWithText($event, '找不到屎王的照片');
-
-            return;
-        }
-
-        $this->bot->replyMessage(new ReplyMessageRequest([
-            'replyToken' => $event->getReplyToken(),
-            'messages'   => [
-                [
-                    'type'               => 'image',
-                    'originalContentUrl' => $imageUrl,
-                    'previewImageUrl'    => $imageUrl,
-                ],
-            ],
-        ]));
+        return $records->groupBy('user_id')
+            ->map(function ($userRecords) {
+                return [
+                    'name'  => $userRecords->first()->user_name,
+                    'count' => $userRecords->count(),
+                ];
+            })
+            ->sortByDesc('count')
+            ->values();
     }
 }
